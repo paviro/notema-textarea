@@ -2,7 +2,7 @@ use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 use ratatui_core::style::{Color, Style};
 use ratatui_core::widgets::Widget as _;
-use ratatui_textarea::{CursorMove, TextArea, WrapMode};
+use ratatui_textarea::{CursorMove, DataCursor, TextArea, WrapMode};
 
 fn render_lines(textarea: &TextArea<'_>, width: u16, height: u16) -> Vec<String> {
     let area = Rect {
@@ -41,6 +41,62 @@ fn render_buffer(textarea: &TextArea<'_>, width: u16, height: u16) -> Buffer {
 fn wrap_mode_default_is_none() {
     let textarea = TextArea::default();
     assert_eq!(textarea.wrap_mode(), WrapMode::None);
+}
+
+#[test]
+fn punctuation_reflows_while_typing_and_resizing_without_changing_text() {
+    let mut textarea = TextArea::from(["a word"]);
+    textarea.set_wrap_mode(WrapMode::WordOrGlyph);
+    textarea.move_cursor(CursorMove::End);
+    render(&textarea, 6, 4);
+    textarea.insert_char(',');
+    assert_eq!(render_lines(&textarea, 6, 4)[..2], ["a     ", "word, "]);
+    assert_eq!(textarea.cursor(), (0, 7));
+    assert_eq!(
+        (textarea.screen_cursor().row, textarea.screen_cursor().col),
+        (1, 5)
+    );
+    assert_eq!(textarea.cursor_at_screen(1, 4), DataCursor(0, 6));
+
+    assert_eq!(render_lines(&textarea, 8, 4)[0], "a word, ");
+    assert_eq!(
+        (textarea.screen_cursor().row, textarea.screen_cursor().col),
+        (0, 7)
+    );
+    assert_eq!(textarea.cursor_at_screen(0, 6), DataCursor(0, 6));
+    assert_eq!(textarea.lines(), ["a word,"]);
+    assert!(textarea.undo());
+    assert_eq!(render_lines(&textarea, 6, 4)[0], "a word");
+}
+
+#[test]
+fn punctuation_wrap_navigation_selection_and_scroll_share_the_layout() {
+    let mut textarea = TextArea::from(["a word, next"]);
+    textarea.set_wrap_mode(WrapMode::WordOrGlyph);
+    textarea.set_cursor_line_style(Style::default());
+    textarea.set_selection_style(Style::default().bg(Color::Blue));
+    render(&textarea, 6, 4);
+
+    textarea.move_cursor(CursorMove::Down);
+    assert_eq!(textarea.cursor(), (0, 2));
+    textarea.start_selection();
+    textarea.move_cursor(CursorMove::Jump(0, 7));
+    assert_eq!(textarea.selection_range(), Some(((0, 2), (0, 7))));
+    let buffer = render_buffer(&textarea, 6, 4);
+    assert_eq!(buffer[(4, 1)].symbol(), ",");
+    assert_eq!(buffer[(4, 1)].style().bg, Some(Color::Blue));
+    textarea.copy();
+    assert_eq!(textarea.yank_text(), "word,");
+    textarea.cancel_selection();
+
+    textarea.move_cursor(CursorMove::End);
+    assert_eq!(render_lines(&textarea, 6, 2), ["word, ", "next  "]);
+    assert_eq!(textarea.scroll_offset(), 1);
+    assert_eq!(
+        textarea.cursor_at_screen(textarea.scroll_offset() as usize, 4),
+        DataCursor(0, 6)
+    );
+    assert_eq!(textarea.lines(), ["a word, next"]);
 }
 
 #[test]
@@ -144,7 +200,7 @@ fn word_and_word_or_glyph_differ_for_long_words() {
         vec![
             "alpha     ".to_string(),
             "supercalif".to_string(),
-            " omega    ".to_string(),
+            "omega     ".to_string(),
             "          ".to_string(),
         ]
     );
@@ -159,8 +215,8 @@ fn word_and_word_or_glyph_differ_for_long_words() {
             "supercalif".to_string(),
             "ragilistic".to_string(),
             "expialidoc".to_string(),
-            "ious      ".to_string(),
-            " omega    ".to_string(),
+            "ious omega".to_string(),
+            "          ".to_string(),
         ]
     );
 }

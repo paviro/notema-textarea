@@ -2,21 +2,27 @@
 use arbitrary::Arbitrary;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
+use unicode_linebreak::{BreakClass, BreakOpportunity, break_property, linebreaks};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
 /// Specify how logical lines are soft-wrapped at render time.
+///
+/// Word modes use Unicode 15.0 line-break opportunities. Dictionary-based
+/// segmentation for complex-context scripts is not supported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum WrapMode {
     /// Disable soft wrapping and keep horizontal scrolling behavior.
     None,
-    /// Wrap only at word boundaries. Words wider than viewport are not split.
+    /// Wrap at Unicode line-break opportunities without splitting oversized segments.
     Word,
     /// Wrap at grapheme boundaries.
     Glyph,
-    /// Wrap at word boundaries, and fall back to grapheme wrapping for long words.
+    /// Wrap at Unicode line-break opportunities, splitting oversized segments at
+    /// grapheme boundaries. Keep trailing punctuation with its preceding grapheme
+    /// when that ending fits within the viewport.
     WordOrGlyph,
 }
 
@@ -29,12 +35,6 @@ pub(crate) struct WrappedLine {
     pub end_col: usize,
     pub first_in_row: bool,
     pub last_in_row: bool,
-}
-
-#[derive(Clone, Copy)]
-struct Chunk {
-    start: usize,
-    end: usize,
 }
 
 pub(crate) fn effective_wrap_width(total_width: u16, line_number_len: Option<u8>) -> usize {
@@ -110,69 +110,120 @@ fn wrap_word_chunks(
     tab_len: u8,
     fallback_to_glyph: bool,
 ) -> Vec<(usize, usize)> {
-    let chunks: Vec<_> = UnicodeSegmentation::split_word_bound_indices(line)
-        .map(|(start, text)| Chunk {
-            start,
-            end: start + text.len(),
-        })
-        .collect();
-
-    if chunks.is_empty() {
-        return vec![(0, 0)];
-    }
-
     let mut out = Vec::new();
-    let mut i = 0usize;
-    let mut seg_start = chunks[0].start;
-    let mut seg_end = seg_start;
-    let mut seg_width = 0usize;
+    let mut chunk_start = 0;
+    let mut row_start = 0;
+    let mut row_end = 0;
+    let mut row_width = 0;
+    let mut grapheme_ends = line
+        .grapheme_indices(true)
+        .map(|(start, g)| start + g.len())
+        .peekable();
 
-    while i < chunks.len() {
-        let chunk = chunks[i];
-        if seg_end == seg_start {
-            seg_start = chunk.start;
+    for (end, opportunity) in linebreaks(line) {
+        while grapheme_ends.peek().is_some_and(|&boundary| boundary < end) {
+            grapheme_ends.next();
         }
-
-        let text = chunk_text(line, chunk);
-        let chunk_width = display_width_from(text, seg_width, tab_len);
-        if seg_width + chunk_width <= width {
-            seg_end = chunk.end;
-            seg_width += chunk_width;
-            i += 1;
+        if grapheme_ends.peek() != Some(&end) {
             continue;
         }
+        let text = &line[chunk_start..end];
+        // Trailing breakable spaces belong to this row even when they overflow.
+        // NBSP and other nonbreaking characters still count toward the width.
+        let content = text.trim_end_matches(|c| {
+            c == '\t'
+                || matches!(
+                    break_property(c as u32),
+                    BreakClass::Space
+                        | BreakClass::Mandatory
+                        | BreakClass::CarriageReturn
+                        | BreakClass::LineFeed
+                        | BreakClass::NextLine
+                )
+        });
+        if display_width_to(content, row_width, tab_len) > width && row_end > row_start {
+            out.push((row_start, row_end));
+            row_start = row_end;
+            row_width = 0;
+        }
 
-        if seg_end > seg_start {
-            // Keep the space that overflows a wrap boundary as trailing
-            // whitespace on the current row instead of letting it lead the
-            // next one. Coverage stays contiguous for cursor mapping.
-            if is_whitespace_chunk(text) {
-                seg_end = chunk.end;
-                i += 1;
+        if fallback_to_glyph && display_width_to(content, 0, tab_len) > width {
+            let content_end = chunk_start + content.len();
+            split_word_by_grapheme_width(line, chunk_start, content_end, width, tab_len, &mut out);
+            // Keep the last fragment open so the next segment can use its space.
+            if let Some((start, _)) = out.pop() {
+                row_start = start;
+                row_width = display_width_to(&line[start..end], 0, tab_len);
             }
-            out.push((seg_start, seg_end));
-            seg_start = seg_end;
-            seg_width = 0;
-            continue;
-        }
-
-        if fallback_to_glyph {
-            split_range_by_grapheme_width(line, chunk.start, chunk.end, width, tab_len, &mut out);
         } else {
-            out.push((chunk.start, chunk.end));
+            row_width = display_width_to(text, row_width, tab_len);
         }
+        row_end = end;
+        chunk_start = end;
 
-        i += 1;
-        seg_start = chunk.end;
-        seg_end = chunk.end;
-        seg_width = 0;
+        if opportunity == BreakOpportunity::Mandatory {
+            out.push((row_start, row_end));
+            row_start = row_end;
+            row_width = 0;
+        }
     }
 
-    if seg_end > seg_start {
-        out.push((seg_start, seg_end));
+    if row_end > row_start {
+        out.push((row_start, row_end));
     }
-
     out
+}
+
+fn split_word_by_grapheme_width(
+    line: &str,
+    start: usize,
+    end: usize,
+    width: usize,
+    tab_len: u8,
+    out: &mut Vec<(usize, usize)>,
+) {
+    let mut tail_start = end;
+    for (offset, grapheme) in line[start..end].grapheme_indices(true).rev() {
+        if grapheme.chars().next().is_some_and(is_trailing_punctuation) {
+            tail_start = start + offset;
+        } else {
+            if tail_start < end && !grapheme.chars().all(char::is_whitespace) {
+                tail_start = start + offset;
+            }
+            break;
+        }
+    }
+
+    if tail_start == end || display_width_to(&line[tail_start..end], 0, tab_len) > width {
+        split_range_by_grapheme_width(line, start, end, width, tab_len, out);
+        return;
+    }
+
+    let first_fragment = out.len();
+    split_range_by_grapheme_width(line, start, tail_start, width, tab_len, out);
+    if out.len() > first_fragment {
+        let last = out.last_mut().expect("the prefix produced a fragment");
+        if display_width_to(&line[last.0..end], 0, tab_len) <= width {
+            last.1 = end;
+            return;
+        }
+    }
+    out.push((tail_start, end));
+}
+
+fn is_trailing_punctuation(c: char) -> bool {
+    matches!(
+        break_property(c as u32),
+        BreakClass::ClosePunctuation
+            | BreakClass::CloseParenthesis
+            | BreakClass::Exclamation
+            | BreakClass::InfixSeparator
+            | BreakClass::Inseparable
+            | BreakClass::NonStarter
+            | BreakClass::Quotation
+            | BreakClass::Postfix
+            | BreakClass::Symbol
+    )
 }
 
 fn split_range_by_grapheme_width(
@@ -220,20 +271,6 @@ fn split_range_by_grapheme_width(
     }
 }
 
-#[inline]
-fn chunk_text(line: &str, chunk: Chunk) -> &str {
-    &line[chunk.start..chunk.end]
-}
-
-#[inline]
-fn is_whitespace_chunk(text: &str) -> bool {
-    !text.is_empty() && text.chars().all(char::is_whitespace)
-}
-
-fn display_width_from(text: &str, start_width: usize, tab_len: u8) -> usize {
-    display_width_to(text, start_width, tab_len).saturating_sub(start_width)
-}
-
 fn display_width_to(text: &str, mut width: usize, tab_len: u8) -> usize {
     for c in text.chars() {
         if c == '\t' {
@@ -277,6 +314,121 @@ mod tests {
         let have = segments("Hello this is a test", WrapMode::WordOrGlyph, 15);
         assert_eq!(have, vec!["Hello this is a ", "test"]);
         assert!(have[1..].iter().all(|s| !s.starts_with(' ')));
+    }
+
+    #[test]
+    fn unicode_wrap_keeps_punctuation_with_the_word() {
+        for mode in [WrapMode::Word, WrapMode::WordOrGlyph] {
+            for punctuation in [
+                ",", ".", "!", "?", ":", ";", "…", "?!", "...", ")", "]", "}", "\"", "”", "’",
+                "。」",
+            ] {
+                let text = format!("a word{punctuation} next");
+                let width = display_width_to(&format!("word{punctuation}"), 0, 4).max(6);
+                let rows = segments(&text, mode, width);
+                assert_eq!(rows[0], "a ", "{mode:?}: {text}");
+                assert_eq!(rows[1], format!("word{punctuation} "), "{mode:?}: {text}");
+                assert_eq!(rows.concat(), text);
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_wrap_respects_opening_punctuation_and_cjk_breaks() {
+        for mode in [WrapMode::Word, WrapMode::WordOrGlyph] {
+            assert_eq!(segments("a (word) end", mode, 7), ["a ", "(word) ", "end"]);
+            assert_eq!(segments("你好，世界。", mode, 6), ["你好，", "世界。"]);
+            assert_eq!(
+                segments("你好，世界。", mode, 4),
+                ["你", "好，", "世", "界。"]
+            );
+        }
+    }
+
+    #[test]
+    fn unicode_wrap_respects_nonbreaking_and_zero_width_characters() {
+        for mode in [WrapMode::Word, WrapMode::WordOrGlyph] {
+            for joined in ["ab\u{a0}cd", "ab\u{202f}cd", "ab\u{2060}cd"] {
+                let text = format!("x {joined}");
+                assert_eq!(segments(&text, mode, 5), ["x ", joined]);
+            }
+            assert_eq!(segments("ab\u{200b}cd", mode, 2), ["ab\u{200b}", "cd"]);
+        }
+    }
+
+    #[test]
+    fn unicode_wrap_honors_mandatory_breaks_without_extra_end_row() {
+        for mode in [WrapMode::Word, WrapMode::WordOrGlyph] {
+            for separator in ["\n", "\r\n", "\u{85}", "\u{2028}", "\u{2029}"] {
+                let text = format!("one{separator}two{separator}");
+                let rows = segments(&text, mode, 80);
+                assert_eq!(rows, [format!("one{separator}"), format!("two{separator}")]);
+                assert_eq!(rows.concat(), text);
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_wrap_keeps_overflowing_spaces_on_the_previous_row() {
+        for mode in [WrapMode::Word, WrapMode::WordOrGlyph] {
+            assert_eq!(segments("hello   world", mode, 5), ["hello   ", "world"]);
+            assert_eq!(segments("hello\tworld", mode, 5), ["hello\t", "world"]);
+            assert_eq!(segments("ab\tcd ef", mode, 6), ["ab\tcd ", "ef"]);
+            assert_eq!(segments("     ", mode, 2), ["     "]);
+            assert_eq!(segments("", mode, 2), [""]);
+        }
+    }
+
+    #[test]
+    fn emergency_wrap_keeps_the_punctuated_ending_together() {
+        for (text, width, expected) in [
+            ("hello,", 5, vec!["hell", "o,"]),
+            ("abcdef?!", 4, vec!["abcd", "ef?!"]),
+            ("abcdef?!", 3, vec!["abc", "de", "f?!"]),
+            ("abcdef?! next", 6, vec!["abcde", "f?! ", "next"]),
+            ("hello, next", 8, vec!["hello, ", "next"]),
+            ("abcde\u{301}!", 5, vec!["abcd", "e\u{301}!"]),
+            ("hello,\u{2028}next", 5, vec!["hell", "o,\u{2028}", "next"]),
+            ("hello,", 1, vec!["h", "e", "l", "l", "o", ","]),
+            ("abc?!", 2, vec!["ab", "c?", "!"]),
+        ] {
+            assert_eq!(
+                segments(text, WrapMode::WordOrGlyph, width),
+                expected,
+                "{text} at {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_ranges_cover_the_source_and_preserve_graphemes() {
+        for text in [
+            "hello, world?!",
+            "你好，世界。",
+            "a e\u{301}! 👩🏽‍💻 🇩🇪 end",
+            "a\tword...   next",
+            "ab\u{a0}cd\u{2060}ef",
+            "one\u{2028}two\r\nthree",
+        ] {
+            let boundaries: Vec<_> = text
+                .grapheme_indices(true)
+                .map(|(i, _)| i)
+                .chain([text.len()])
+                .collect();
+            for mode in [WrapMode::Word, WrapMode::WordOrGlyph, WrapMode::Glyph] {
+                for width in 0..=20 {
+                    let rows = line_ranges(text, mode, width, 4);
+                    let mut previous_end = 0;
+                    for (start, end) in rows {
+                        assert_eq!(start, previous_end, "{text:?} {mode:?} {width}");
+                        assert!(end > start);
+                        assert!(boundaries.contains(&end), "{text:?} at {end}");
+                        previous_end = end;
+                    }
+                    assert_eq!(previous_end, text.len());
+                }
+            }
+        }
     }
 
     #[test]
