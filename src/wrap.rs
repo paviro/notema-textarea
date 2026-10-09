@@ -1,10 +1,10 @@
+use crate::width::display_width_to;
 #[cfg(feature = "arbitrary")]
 use arbitrary::Arbitrary;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use unicode_linebreak::{BreakClass, BreakOpportunity, break_property, linebreaks};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthChar;
 
 /// Specify how logical lines are soft-wrapped at render time.
 ///
@@ -271,21 +271,6 @@ fn split_range_by_grapheme_width(
     }
 }
 
-fn display_width_to(text: &str, mut width: usize, tab_len: u8) -> usize {
-    for c in text.chars() {
-        if c == '\t' {
-            if tab_len > 0 {
-                let tab = tab_len as usize;
-                let pad = tab - (width % tab);
-                width += pad;
-            }
-        } else {
-            width += c.width().unwrap_or(0);
-        }
-    }
-    width
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +280,19 @@ mod tests {
             .into_iter()
             .map(|(s, e)| &line[s..e])
             .collect()
+    }
+
+    #[test]
+    fn emoji_width_matches_its_rendered_cells() {
+        for glyph in ["👩🏽‍💻", "🇩🇪", "❤️", "1️⃣"] {
+            for mode in [WrapMode::Glyph, WrapMode::WordOrGlyph] {
+                let text = format!("a{glyph}b{glyph}c");
+                assert_eq!(
+                    segments(&text, mode, 4),
+                    [format!("a{glyph}b"), format!("{glyph}c")]
+                );
+            }
+        }
     }
 
     #[test]

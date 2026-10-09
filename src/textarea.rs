@@ -1493,6 +1493,8 @@ impl<'a> TextArea<'a> {
     /// priority. Out-of-bounds line indices and byte offsets are ignored, and ranges
     /// are clipped to each soft-wrapped fragment at render time, so callers can pass
     /// whole-line ranges regardless of wrapping.
+    /// A grapheme uses the syntax style at its first character; cursor, selection,
+    /// and search styles apply to every grapheme they touch.
     ///
     /// Use this to drive e.g. markdown syntax highlighting. The caller is responsible
     /// for keeping the spans in sync with edits (recompute and set again on change).
@@ -1523,7 +1525,8 @@ impl<'a> TextArea<'a> {
     /// the column). A mask suppresses them entirely. Offsets are per `char`, not
     /// per grapheme cluster: substituting a base char leaves its combining marks
     /// to compose onto the replacement. Where two entries share an offset, the
-    /// first wins.
+    /// first wins. Replacements that change grapheme boundaries or widths are
+    /// ignored, including when combined with other replacements.
     ///
     /// The caller keeps the offsets in sync with edits (recompute and set again).
     pub fn set_glyph_substitutions(&mut self, subs: Vec<Vec<(usize, char)>>) {

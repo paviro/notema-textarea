@@ -1,9 +1,10 @@
 use crate::cursor::{DataCursor, ScreenCursor};
 use crate::textarea::TextArea;
 use crate::util::num_digits;
+use crate::width::{display_width_to, grapheme_width};
 use crate::wrap::{WrapMode, WrappedLine, effective_wrap_width, wrapped_rows};
 use ratatui_core::layout::Rect;
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ScreenLine {
@@ -23,28 +24,19 @@ fn is_pure_ascii(line: &str) -> bool {
     line.is_ascii() && !line.contains('\t')
 }
 
-fn char_display_width(c: char, col: usize, tab_len: u8) -> usize {
-    if c == '\t' {
-        let tab = tab_len.max(1) as usize;
-        let pad = tab - (col % tab);
-        pad.max(1)
-    } else {
-        c.width().unwrap_or(0)
-    }
-}
-
 fn display_width(text: &str, tab_len: u8) -> usize {
-    let mut col = 0usize;
-    for c in text.chars() {
-        col += char_display_width(c, col, tab_len);
-    }
-    col
+    display_width_to(text, 0, tab_len)
 }
 
 fn screen_col_for_char_offset(text: &str, char_offset: usize, tab_len: u8) -> usize {
     let mut col = 0usize;
-    for c in text.chars().take(char_offset) {
-        col += char_display_width(c, col, tab_len);
+    let mut chars = 0;
+    for grapheme in text.graphemes(true) {
+        chars += grapheme.chars().count();
+        if chars > char_offset {
+            break;
+        }
+        col += grapheme_width(grapheme, col, tab_len);
     }
     col
 }
@@ -52,16 +44,16 @@ fn screen_col_for_char_offset(text: &str, char_offset: usize, tab_len: u8) -> us
 fn char_offset_for_screen_col(text: &str, screen_col: usize, tab_len: u8) -> usize {
     let mut col = 0usize;
     let mut chars = 0usize;
-    for c in text.chars() {
+    for grapheme in text.graphemes(true) {
         if col >= screen_col {
             break;
         }
-        let width = char_display_width(c, col, tab_len);
+        let width = grapheme_width(grapheme, col, tab_len);
         if col + width > screen_col {
             break;
         }
         col += width;
-        chars += 1;
+        chars += grapheme.chars().count();
     }
     chars
 }
@@ -196,6 +188,8 @@ impl TextArea<'_> {
     /// to the first line. `screen_col` is a column within that row. Both are
     /// clamped to valid ranges, so out-of-bounds input snaps to the nearest cell
     /// rather than panicking.
+    /// A cell inside a grapheme maps to its first character. Multiple character
+    /// positions within that grapheme share the same display column.
     pub fn cursor_at_screen(&self, screen_row: usize, screen_col: usize) -> DataCursor {
         let count = self.screen_lines_count();
         if count == 0 {

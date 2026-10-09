@@ -1,4 +1,8 @@
-# ratatui-textarea
+# notema-textarea
+
+Notema uses the `notema-textarea` branch of this fork, pinned to a commit in its Cargo manifest.
+It includes viewport access, syntax styling, top padding, glyph substitutions, and Unicode wrapping.
+The Rust crate name remains `ratatui_textarea`.
 
 [![crate][crates-io-badge]][crate]
 [![docs][doc-badge]][doc]

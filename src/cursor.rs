@@ -310,15 +310,16 @@ impl CursorMove {
         let dc = cursor.dc.unwrap_or_else(|| cursor.to_array_cursor(ta));
 
         match self {
-            Forward if col >= ta.screen_line_width(row) => (row + 1 < ta.screen_lines_count())
-                .then(|| ScreenCursor {
+            Forward if dc.1 >= ta.screen_line(row).wrapped.end_col => {
+                (row + 1 < ta.screen_lines_count()).then(|| ScreenCursor {
                     row: row + 1,
                     col: 0,
                     char: None,
                     dc: None,
-                }),
+                })
+            }
             Forward => Some(ta.increment_screen_cursor(cursor)),
-            Back if col == 0 => {
+            Back if dc.1 == ta.screen_line(row).wrapped.start_col => {
                 let row = row.checked_sub(1)?;
                 Some(ScreenCursor {
                     row,

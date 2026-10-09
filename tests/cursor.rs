@@ -110,11 +110,13 @@ fn back() {
 
 #[test]
 fn up() {
-    for text in [["abc", "def", "ghi"], ["あいう", "🐶🐱🐰", "👪🤟🏿👩🏻‍❤️‍💋‍👨🏾"]]
-    {
+    for (text, columns) in [
+        (["abc", "def", "ghi"], [0, 1, 2, 3]),
+        (["あいう", "🐶🐱🐰", "👪🤟🏿👩🏻‍❤️‍💋‍👨🏾"], [0, 1, 1, 2]),
+    ] {
         let mut t = TextArea::from(text);
 
-        for col in 0..=3 {
+        for (col, &expected_col) in columns.iter().enumerate() {
             let mut row = 2;
 
             t.move_cursor(CursorMove::Jump(2, col as u16));
@@ -123,7 +125,7 @@ fn up() {
             while row > 0 {
                 t.move_cursor(CursorMove::Up);
                 row -= 1;
-                assert_eq!(t.cursor(), (row, col), "{:?}", t.lines());
+                assert_eq!(t.cursor(), (row, expected_col), "{:?}", t.lines());
             }
         }
     }
@@ -144,11 +146,13 @@ fn up_trim() {
 
 #[test]
 fn down() {
-    for text in [["abc", "def", "ghi"], ["あいう", "🐶🐱🐰", "👪🤟🏿👩🏻‍❤️‍💋‍👨🏾"]]
-    {
+    for (text, columns) in [
+        (["abc", "def", "ghi"], [0, 1, 2, 3]),
+        (["あいう", "🐶🐱🐰", "👪🤟🏿👩🏻‍❤️‍💋‍👨🏾"], [0, 1, 3, 13]),
+    ] {
         let mut t = TextArea::from(text);
 
-        for col in 0..=3 {
+        for (col, &expected_col) in columns.iter().enumerate() {
             let mut row = 0;
 
             t.move_cursor(CursorMove::Jump(0, col as u16));
@@ -157,7 +161,12 @@ fn down() {
             while row < 2 {
                 t.move_cursor(CursorMove::Down);
                 row += 1;
-                assert_eq!(t.cursor(), (row, col), "{:?}", t.lines());
+                assert_eq!(
+                    t.cursor(),
+                    (row, if row == 2 { expected_col } else { col }),
+                    "{:?}",
+                    t.lines()
+                );
             }
         }
     }

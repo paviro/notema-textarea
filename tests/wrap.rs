@@ -274,7 +274,7 @@ fn glyph_mode_combining_grapheme_renders_in_two_rows() {
     textarea.set_wrap_mode(WrapMode::Glyph);
 
     let lines = render_lines(&textarea, 1, 2);
-    assert_eq!(lines, vec!["e".to_string(), "x".to_string()]);
+    assert_eq!(lines, vec!["e\u{301}".to_string(), "x".to_string()]);
 }
 
 #[test]
@@ -511,4 +511,96 @@ fn wrapped_cursor_three_visual_lines_from_one_logical() {
     assert_eq!(textarea.cursor(), (0, 5));
     textarea.move_cursor(CursorMove::Up);
     assert_eq!(textarea.cursor(), (0, 0));
+}
+
+#[test]
+fn grapheme_cells_cursor_and_tabs_agree() {
+    for glyph in ["e\u{301}", "👩🏽‍💻", "🇩🇪", "❤️", "1️⃣"] {
+        for mode in [WrapMode::None, WrapMode::Glyph, WrapMode::WordOrGlyph] {
+            let source = format!("{glyph}\tX");
+            let mut textarea = TextArea::from([source.as_str()]);
+            textarea.set_wrap_mode(mode);
+            textarea.set_cursor_style(Style::default().bg(Color::Red));
+            let glyph_chars = glyph.chars().count();
+            for offset in 0..glyph_chars {
+                textarea.move_cursor(CursorMove::Jump(0, offset as u16));
+                let buffer = render_buffer(&textarea, 8, 3);
+                assert_eq!(buffer[(0, 0)].symbol(), glyph, "{source} {offset}");
+                assert_eq!(buffer[(0, 0)].style().bg, Some(Color::Red));
+                assert_eq!(buffer[(4, 0)].symbol(), "X");
+                assert_eq!(textarea.screen_cursor().col, 0);
+                assert_eq!(textarea.cursor_at_screen(0, 0), DataCursor(0, 0));
+            }
+            textarea.move_cursor(CursorMove::End);
+            assert_eq!(textarea.screen_cursor().col, 5);
+            assert_eq!(
+                textarea.cursor_at_screen(0, 4),
+                DataCursor(0, glyph_chars + 1)
+            );
+            if glyph != "e\u{301}" {
+                assert_eq!(textarea.cursor_at_screen(0, 1), DataCursor(0, 0));
+            }
+            assert_eq!(textarea.lines(), [source.as_str()]);
+        }
+    }
+}
+
+#[test]
+fn grapheme_wrapping_survives_resize_selection_and_undo() {
+    let source = "a👩🏽‍💻b🇩🇪c";
+    let mut textarea = TextArea::from([source]);
+    textarea.set_wrap_mode(WrapMode::Glyph);
+    textarea.set_cursor_style(Style::default());
+    let buffer = render_buffer(&textarea, 4, 4);
+    assert_eq!(buffer[(1, 0)].symbol(), "👩🏽‍💻");
+    assert_eq!(buffer[(3, 0)].symbol(), "b");
+    assert_eq!(buffer[(0, 1)].symbol(), "🇩🇪");
+    textarea.move_cursor(CursorMove::Jump(0, 2));
+    textarea.start_selection();
+    textarea.move_cursor(CursorMove::Jump(0, 4));
+    let buffer = render_buffer(&textarea, 4, 4);
+    assert_eq!(buffer[(1, 0)].symbol(), "👩🏽‍💻");
+    assert_eq!(buffer[(1, 0)].style().bg, Some(Color::LightBlue));
+    textarea.copy();
+    assert_eq!(textarea.yank_text(), "🏽‍");
+    textarea.cancel_selection();
+    textarea.move_cursor(CursorMove::End);
+    textarea.insert_char('!');
+    assert!(textarea.undo());
+    let buffer = render_buffer(&textarea, 9, 4);
+    assert_eq!(buffer[(4, 0)].symbol(), "🇩🇪");
+    assert_eq!(textarea.screen_cursor().col, 7);
+    assert_eq!(textarea.lines(), [source]);
+}
+
+#[test]
+fn back_visits_character_positions_inside_a_leading_grapheme() {
+    let mut textarea = TextArea::from(["👩🏽‍💻X"]);
+    textarea.set_wrap_mode(WrapMode::WordOrGlyph);
+    render(&textarea, 8, 3);
+    textarea.move_cursor(CursorMove::Jump(0, 3));
+    for expected in [2, 1, 0] {
+        textarea.move_cursor(CursorMove::Back);
+        assert_eq!(textarea.cursor(), (0, expected));
+        assert_eq!(textarea.screen_cursor().col, 0);
+    }
+    for expected in [1, 2, 3, 4] {
+        textarea.move_cursor(CursorMove::Forward);
+        assert_eq!(textarea.cursor(), (0, expected));
+    }
+    assert_eq!(textarea.screen_cursor().col, 2);
+}
+
+#[test]
+fn syntax_ranges_inside_graphemes_do_not_split_rendering() {
+    let mut textarea = TextArea::from(["👩🏽‍💻\tX"]);
+    textarea.set_cursor_style(Style::default());
+    textarea.set_syntax_spans(vec![vec![
+        (0, "👩".len(), Style::default().fg(Color::Red)),
+        ("👩".len(), "👩🏽‍💻".len(), Style::default().fg(Color::Blue)),
+    ]]);
+    let buffer = render_buffer(&textarea, 8, 2);
+    assert_eq!(buffer[(0, 0)].symbol(), "👩🏽‍💻");
+    assert_eq!(buffer[(0, 0)].style().fg, Some(Color::Red));
+    assert_eq!(buffer[(4, 0)].symbol(), "X");
 }

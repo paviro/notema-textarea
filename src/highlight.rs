@@ -1,8 +1,10 @@
 use crate::util::{num_digits, spaces};
+use crate::width::grapheme_width;
 use ratatui_core::style::Style;
 use ratatui_core::text::{Line, Span};
 use std::borrow::Cow;
-use unicode_width::UnicodeWidthChar as _;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 // A styled byte range with a layering priority. The effective style of any byte is
 // the style of the highest-priority range covering it, or the line's base style
@@ -36,10 +38,23 @@ fn valid_substitution(line: &str, offset: usize, replacement: char) -> bool {
     let Some(replaced) = line[offset..].chars().next() else {
         return false; // A boundary, but at the end: nothing there to replace.
     };
-    matches!(
+    if !matches!(
         (replaced.width(), replacement.width()),
         (Some(a), Some(b)) if a == b
-    )
+    ) {
+        return false;
+    }
+    let mut changed = line.to_owned();
+    changed.replace_range(
+        offset..offset + replaced.len_utf8(),
+        &replacement.to_string(),
+    );
+    // Equal scalar widths alone do not protect emoji sequences or their neighbours.
+    line.graphemes(true)
+        .map(|g| (g.chars().count(), g.width()))
+        .eq(changed
+            .graphemes(true)
+            .map(|g| (g.chars().count(), g.width())))
 }
 
 struct DisplayTextBuilder {
@@ -87,42 +102,25 @@ impl DisplayTextBuilder {
             return Cow::Owned(masked);
         }
 
-        let tab = spaces(self.tab_len);
-        let mut buf = String::new();
-        for (i, c) in s.char_indices() {
-            if c == '\t' {
-                if buf.is_empty() {
-                    buf.reserve(s.len());
-                    buf.push_str(&s[..i]);
-                }
-                if self.tab_len > 0 {
-                    let len = self.tab_len as usize - (self.width % self.tab_len as usize);
-                    buf.push_str(&tab[..len]);
-                    self.width += len;
-                }
-            } else if let Some(replacement) = self.substitution_at(start + i) {
-                if buf.is_empty() {
-                    buf.reserve(s.len());
-                    buf.push_str(&s[..i]);
-                }
-                buf.push(replacement);
-                // Advance by the *replaced* char's width. Validation makes the two
-                // equal; taking it from the source keeps tab stops right even if a
-                // bad entry ever reaches here.
-                self.width += c.width().unwrap_or(0);
+        let mut buf = None::<String>;
+        for (i, grapheme) in s.grapheme_indices(true) {
+            let width = grapheme_width(grapheme, self.width, self.tab_len);
+            if grapheme == "\t" {
+                let buf = buf.get_or_insert_with(|| s[..i].to_owned());
+                buf.push_str(spaces(width as u8));
             } else {
-                if !buf.is_empty() {
-                    buf.push(c);
+                for (offset, c) in grapheme.char_indices() {
+                    if let Some(replacement) = self.substitution_at(start + i + offset) {
+                        let buf = buf.get_or_insert_with(|| s[..i + offset].to_owned());
+                        buf.push(replacement);
+                    } else if let Some(buf) = &mut buf {
+                        buf.push(c);
+                    }
                 }
-                self.width += c.width().unwrap_or(0);
             }
+            self.width += width;
         }
-
-        if !buf.is_empty() {
-            Cow::Owned(buf)
-        } else {
-            Cow::Borrowed(s)
-        }
+        buf.map_or(Cow::Borrowed(s), Cow::Owned)
     }
 }
 
@@ -255,6 +253,21 @@ impl<'a> LineHighlighter<'a> {
         self.subs.sort_by_key(|&(offset, _)| offset);
         // Stable sort plus `dedup_by_key` keeps the first entry for an offset.
         self.subs.dedup_by_key(|&mut (offset, _)| offset);
+        let mut changed = self.line.to_owned();
+        // Walk backwards so replacing a multibyte character leaves earlier offsets valid.
+        for index in (0..self.subs.len()).rev() {
+            let (offset, replacement) = self.subs[index];
+            if valid_substitution(&changed, offset, replacement) {
+                let len = changed[offset..]
+                    .chars()
+                    .next()
+                    .expect("validated character")
+                    .len_utf8();
+                changed.replace_range(offset..offset + len, &replacement.to_string());
+            } else {
+                self.subs.remove(index);
+            }
+        }
     }
 
     pub fn selection(
@@ -308,7 +321,7 @@ impl<'a> LineHighlighter<'a> {
         let Self {
             line,
             mut spans,
-            ranges,
+            mut ranges,
             tab_len,
             style_begin,
             cursor_style,
@@ -333,30 +346,40 @@ impl<'a> LineHighlighter<'a> {
             return Line::from(spans);
         }
 
-        // Cut the line into segments at every range edge; within a segment the set of
-        // covering ranges is constant, so one style wins for the whole segment.
-        let mut points: Vec<usize> = Vec::with_capacity(ranges.len() * 2 + 2);
-        points.push(0);
-        points.push(line.len());
-        for r in &ranges {
-            points.push(r.start);
-            points.push(r.end);
+        // A terminal cell has one style. Syntax follows its first character;
+        // interactive layers cover every grapheme they touch. Masked text renders
+        // one replacement per character, so its style boundaries remain scalar.
+        let boundaries: Vec<_> = if mask.is_some() {
+            line.char_indices()
+                .map(|(start, _)| start)
+                .chain([line.len()])
+                .collect()
+        } else {
+            line.grapheme_indices(true)
+                .map(|(start, _)| start)
+                .chain([line.len()])
+                .collect()
+        };
+        let mut points = vec![0, line.len()];
+        for range in &mut ranges {
+            let start = boundaries.partition_point(|&at| at < range.start);
+            range.start = if range.prio == PRIO_SYNTAX || boundaries[start] == range.start {
+                boundaries[start]
+            } else {
+                boundaries[start - 1]
+            };
+            range.end = boundaries[boundaries.partition_point(|&at| at < range.end)];
+            points.extend([range.start, range.end]);
         }
         points.sort_unstable();
         points.dedup();
 
-        // Walk segments, resolve the highest-priority covering style, and coalesce
-        // adjacent segments that resolve to the same style into one span (so the
-        // display text — and the builder's tab-width bookkeeping — stays contiguous).
         let mut run_start = 0usize;
         let mut run_style = style_begin;
         let mut have_run = false;
 
-        for win in points.windows(2) {
-            let (a, b) = (win[0], win[1]);
-            if a >= b {
-                continue;
-            }
+        for pair in points.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
             // Compose the covering ranges onto the base by *patching* in ascending
             // priority (so higher layers win, but only for the fields they set). This
             // keeps a lower layer's color where a higher layer leaves it unset — e.g.
@@ -365,7 +388,7 @@ impl<'a> LineHighlighter<'a> {
             let mut style = style_begin;
             for lvl in 1..=PRIO_CURSOR {
                 for r in &ranges {
-                    if r.prio == lvl && r.start <= a && b <= r.end {
+                    if r.prio == lvl && r.start <= a && b <= r.end && r.start < r.end {
                         style = style.patch(r.style);
                     }
                 }
@@ -407,7 +430,6 @@ mod tests {
     use super::*;
     use ratatui_core::style::Color;
     use std::fmt::Debug;
-    use unicode_width::UnicodeWidthStr as _;
 
     fn build(text: &'static str, tab: u8, mask: Option<char>) -> Cow<'static, str> {
         DisplayTextBuilder::new(tab, mask, vec![]).build(0, text)
@@ -421,6 +443,14 @@ mod tests {
         let want = offset + built.as_ref().width();
         assert_eq!(b.width, want, "in={:?}, out={:?}", text, built); // Check post condition
         built
+    }
+
+    #[test]
+    fn substitutions_cannot_change_grapheme_width_or_boundaries() {
+        assert!(!valid_substitution("❤️", 0, 'a'));
+        assert!(!valid_substitution("a🇪", 0, '🇩'));
+        assert!(!valid_substitution("🇩🇪", 0, 'a'));
+        assert!(valid_substitution("e\u{301}", 0, 'a'));
     }
 
     #[test]
@@ -444,7 +474,7 @@ mod tests {
         assert_eq!(&build(   "a\t",  0, Some('x')),                "xx");
         assert_eq!(&build(   "a\t",  4, Some('x')),                "xx");
         assert_eq!(&build(   "a\t",  8, Some('x')),                "xx");
-        assert_eq!(&build(    "\t",  0,      None),                "\t");
+        assert_eq!(&build(    "\t",  0,      None),                  "");
         assert_eq!(&build(    "\t",  4,      None),              "    ");
         assert_eq!(&build(    "\t",  8,      None),          "        ");
         assert_eq!(&build(    "\t",  0, Some('x')),                 "x");

@@ -15,6 +15,7 @@ mod search;
 mod textarea;
 mod util;
 mod widget;
+mod width;
 mod word;
 mod wrap;
 
