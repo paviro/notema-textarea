@@ -134,7 +134,7 @@ impl<'a> TextArea<'a> {
         let mut cursor = sc.col as u16;
         // Adjust the cursor position due to the width of line number.
         if self.line_number_style().is_some() {
-            let lnum = num_digits(self.lines().len()) as u16 + 2; // `+ 2` for margins
+            let lnum = self.line_number_width();
             if cursor <= lnum {
                 cursor *= 2; // Smoothly slide the line number into the screen on scrolling left
             } else {
@@ -278,7 +278,7 @@ mod tests {
         // Past the padding the rows are text only, and the padding is gone.
         textarea.scroll((5, 0));
         assert_eq!(render_rows(&textarea, 6), ["2", "3", "4", "5", "6", "7"]);
-        assert_eq!(textarea.scroll_offset(), 5);
+        assert_eq!(textarea.scroll_offset().0, 5);
     }
 
     #[test]
@@ -288,10 +288,10 @@ mod tests {
         render_rows(&textarea, 6);
         textarea.move_cursor(CursorMove::Bottom);
         render_rows(&textarea, 6);
-        assert!(textarea.scroll_offset() > 3);
+        assert!(textarea.scroll_offset().0 > 3);
         textarea.move_cursor(CursorMove::Top);
         assert_eq!(render_rows(&textarea, 6), ["", "", "", "0", "1", "2"]);
-        assert_eq!(textarea.scroll_offset(), 0);
+        assert_eq!(textarea.scroll_offset().0, 0);
     }
 
     /// A wheel scroll inside the padding must stick — only a caret pull-back
@@ -310,7 +310,7 @@ mod tests {
         let mut textarea = numbered(20);
         textarea.set_top_padding(50);
         assert_eq!(render_rows(&textarea, 4), ["", "", "", "0"]);
-        assert_eq!(textarea.scroll_offset(), 0);
+        assert_eq!(textarea.scroll_offset().0, 0);
     }
 
     #[test]
@@ -321,8 +321,8 @@ mod tests {
         assert_eq!(textarea.screen_line_count(), 23);
         assert_eq!(textarea.text_screen_line_count(), 20);
         // A click in the padding lands on the first line, not below it.
-        assert_eq!(textarea.cursor_at_screen(1, 0), DataCursor(0, 0));
-        assert_eq!(textarea.cursor_at_screen(4, 0), DataCursor(1, 0));
+        assert_eq!(textarea.screen_to_data(1, 0), DataCursor(0, 0));
+        assert_eq!(textarea.screen_to_data(4, 0), DataCursor(1, 0));
     }
 
     /// Changing the padding must not drag the document with it.

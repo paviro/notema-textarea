@@ -48,8 +48,8 @@ fn a_substitution_does_not_move_the_caret() {
 
     for col in 0..24 {
         assert_eq!(
-            plain.cursor_at_screen(0, col),
-            substituted.cursor_at_screen(0, col),
+            plain.screen_to_data(0, col),
+            substituted.screen_to_data(0, col),
             "click at column {col}"
         );
     }

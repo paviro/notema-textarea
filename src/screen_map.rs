@@ -162,50 +162,6 @@ impl TextArea<'_> {
         }
     }
 
-    /// The vertical scroll offset applied during the last render, as a top
-    /// screen-row into the wrapped content — counting any
-    /// [`TextArea::set_top_padding`] rows, so it is 0 with the padding fully in
-    /// view. Pair with [`TextArea::screen_line_count`] to drive a scrollbar.
-    /// Zero until the widget has been rendered once.
-    pub fn scroll_offset(&self) -> u16 {
-        self.viewport.scroll_top().0
-    }
-
-    /// The horizontal scroll offset (leftmost visible screen column) applied
-    /// during the last render. Only nonzero for no-wrap fields whose text
-    /// overflows the viewport; always zero when soft-wrap is enabled. Subtract
-    /// it from [`TextArea::screen_cursor`]`().col` to get the caret's
-    /// viewport-relative column (e.g. to place a native terminal cursor). Zero
-    /// until the widget has been rendered once.
-    pub fn horizontal_scroll_offset(&self) -> u16 {
-        self.viewport.scroll_top().1
-    }
-
-    /// Map a screen position to a data cursor `(line, column)`. `screen_row` is
-    /// an absolute wrapped-row index into the content (add [`TextArea::scroll_offset`]
-    /// to a viewport-relative click row) and counts any
-    /// [`TextArea::set_top_padding`] rows, so a position inside the padding maps
-    /// to the first line. `screen_col` is a column within that row. Both are
-    /// clamped to valid ranges, so out-of-bounds input snaps to the nearest cell
-    /// rather than panicking.
-    /// A cell inside a grapheme maps to its first character. Multiple character
-    /// positions within that grapheme share the same display column.
-    pub fn cursor_at_screen(&self, screen_row: usize, screen_col: usize) -> DataCursor {
-        let count = self.screen_lines_count();
-        if count == 0 {
-            return DataCursor(0, 0);
-        }
-        let row = screen_row
-            .saturating_sub(self.effective_top_padding() as usize)
-            .min(count - 1);
-        self.screen_to_array(ScreenCursor {
-            row,
-            col: screen_col,
-            char: None,
-            dc: None,
-        })
-    }
-
     pub(crate) fn screen_line_width(&self, row: usize) -> usize {
         self.screen_lines.borrow()[row].screen_width
     }

@@ -1,6 +1,6 @@
 [package]
 name = "notema-textarea"
-version = "0.9.2"
+version = "0.9.3"
 publish = false
 edition = "2024"
 rust-version = "1.86.0"

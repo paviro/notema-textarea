@@ -56,14 +56,14 @@ fn punctuation_reflows_while_typing_and_resizing_without_changing_text() {
         (textarea.screen_cursor().row, textarea.screen_cursor().col),
         (1, 5)
     );
-    assert_eq!(textarea.cursor_at_screen(1, 4), DataCursor(0, 6));
+    assert_eq!(textarea.screen_to_data(1, 4), DataCursor(0, 6));
 
     assert_eq!(render_lines(&textarea, 8, 4)[0], "a word, ");
     assert_eq!(
         (textarea.screen_cursor().row, textarea.screen_cursor().col),
         (0, 7)
     );
-    assert_eq!(textarea.cursor_at_screen(0, 6), DataCursor(0, 6));
+    assert_eq!(textarea.screen_to_data(0, 6), DataCursor(0, 6));
     assert_eq!(textarea.lines(), ["a word,"]);
     assert!(textarea.undo());
     assert_eq!(render_lines(&textarea, 6, 4)[0], "a word");
@@ -91,9 +91,9 @@ fn punctuation_wrap_navigation_selection_and_scroll_share_the_layout() {
 
     textarea.move_cursor(CursorMove::End);
     assert_eq!(render_lines(&textarea, 6, 2), ["word, ", "next  "]);
-    assert_eq!(textarea.scroll_offset(), 1);
+    assert_eq!(textarea.scroll_offset().0, 1);
     assert_eq!(
-        textarea.cursor_at_screen(textarea.scroll_offset() as usize, 4),
+        textarea.screen_to_data(textarea.scroll_offset().0 as usize, 4),
         DataCursor(0, 6)
     );
     assert_eq!(textarea.lines(), ["a word, next"]);
@@ -529,16 +529,16 @@ fn grapheme_cells_cursor_and_tabs_agree() {
                 assert_eq!(buffer[(0, 0)].style().bg, Some(Color::Red));
                 assert_eq!(buffer[(4, 0)].symbol(), "X");
                 assert_eq!(textarea.screen_cursor().col, 0);
-                assert_eq!(textarea.cursor_at_screen(0, 0), DataCursor(0, 0));
+                assert_eq!(textarea.screen_to_data(0, 0), DataCursor(0, 0));
             }
             textarea.move_cursor(CursorMove::End);
             assert_eq!(textarea.screen_cursor().col, 5);
             assert_eq!(
-                textarea.cursor_at_screen(0, 4),
+                textarea.screen_to_data(0, 4),
                 DataCursor(0, glyph_chars + 1)
             );
             if glyph != "e\u{301}" {
-                assert_eq!(textarea.cursor_at_screen(0, 1), DataCursor(0, 0));
+                assert_eq!(textarea.screen_to_data(0, 1), DataCursor(0, 0));
             }
             assert_eq!(textarea.lines(), [source.as_str()]);
         }
